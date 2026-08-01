@@ -10,5 +10,9 @@ class Settings(BaseSettings):
     max_upload_size_mb: int = 20
     api_key: str
 
+    session_cookie_name: str = "rag_session_id"
+    session_ttl_minutes: int = 1
+    secure_cookies: bool = False
+
 
 settings = Settings()
