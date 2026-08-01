@@ -1,11 +1,11 @@
-version: "3.9"
 services:
   api:
     build: .
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8001:8000"
     volumes:
       - ./data/uploads:/app/data/uploads
+      - ./data/processed:/app/data/processed
       - ./app:/app/app
     env_file:
       - .env

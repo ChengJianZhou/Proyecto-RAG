@@ -21,6 +21,25 @@
 - Nombres de archivo aleatorios (UUID) para evitar path traversal y colisiones.
 - Rate limiting: máximo 20 subidas por hora por IP.
 
+## Procesamiento actual
+
+Al subir un PDF, la API:
+
+- valida que sea un PDF real,
+- guarda el archivo original en `data/uploads`,
+- extrae el texto con `pypdf`,
+- divide el texto en chunks,
+- guarda un JSON procesado en `data/processed`.
+
+Cada archivo JSON contiene:
+- `document_id`,
+- metadatos de cada chunk,
+- texto de cada chunk,
+- número total de caracteres extraídos,
+- número total de chunks.
+
+Esto deja preparado el siguiente paso del pipeline RAG: generación de embeddings e indexación en una base vectorial.
+
 ## Documentación interactiva
 
 Disponible en http://localhost:8000/docs

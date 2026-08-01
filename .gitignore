@@ -4,3 +4,5 @@ __pycache__/
 .env
 data/uploads/*
 !data/uploads/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
