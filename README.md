@@ -1,6 +1,17 @@
 # RAG Project
 
-Backend en FastAPI para un pipeline RAG. Actualmente permite subir documentos PDF, validar su formato, extraer texto, dividirlo en chunks, generar embeddings por chunk y persistir una representación procesada en JSON, como preparación para las siguientes fases de indexación vectorial y retrieval.
+Backend en FastAPI para un pipeline de **Retrieval-Augmented Generation (RAG)**. Permite subir documentos PDF, extraer y normalizar su texto, dividirlo en chunks semánticamente coherentes, generar embeddings vectoriales por chunk y persistir el resultado, como base para las siguientes fases de indexación vectorial, retrieval semántico y generación de respuestas con un LLM.
+
+## Estado del proyecto
+
+| Fase | Estado |
+|---|---|
+| Ingestión de PDFs (validación, extracción, chunking) | ✅ Completado |
+| Generación de embeddings por chunk | ✅ Completado |
+| Seguridad (API key, rate limiting, sesiones temporales) | ✅ Completado |
+| Indexación en base de datos vectorial (Qdrant) | 🚧 En progreso |
+| Endpoint de consulta `/query` (retrieval semántico) | ⏳ Pendiente |
+| Generación de respuesta con LLM | ⏳ Pendiente |
 
 ## Cómo arrancar
 
@@ -36,20 +47,24 @@ API_KEY=your-secret-api-key-here
 SESSION_COOKIE_NAME=rag_session_id
 SESSION_TTL_MINUTES=1
 SECURE_COOKIES=false
+EMBEDDING_MODEL=intfloat/multilingual-e5-small
 ```
 
 > **Nota:** `SESSION_TTL_MINUTES=1` está fijado así temporalmente para pruebas de desarrollo (permite validar rápido el ciclo de expiración y limpieza automática). Antes de cualquier demo o entorno real, debe subirse a un valor razonable (p. ej. `120`).
 
 ### Variables disponibles
 
-- `APP_NAME`: nombre de la aplicación.
-- `UPLOAD_DIR`: carpeta donde se guardan los PDFs originales.
-- `PROCESSED_DIR`: carpeta donde se guardan los JSON procesados.
-- `MAX_UPLOAD_SIZE_MB`: tamaño máximo permitido para cada PDF.
-- `API_KEY`: clave necesaria para usar el endpoint protegido de subida.
-- `SESSION_COOKIE_NAME`: nombre de la cookie de sesión temporal.
-- `SESSION_TTL_MINUTES`: duración de la sesión y de la retención temporal de archivos (actualmente en `1` para pruebas).
-- `SECURE_COOKIES`: usar `true` cuando la app esté detrás de HTTPS.
+| Variable | Descripción |
+|---|---|
+| `APP_NAME` | Nombre de la aplicación. |
+| `UPLOAD_DIR` | Carpeta donde se guardan los PDFs originales. |
+| `PROCESSED_DIR` | Carpeta donde se guardan los JSON procesados. |
+| `MAX_UPLOAD_SIZE_MB` | Tamaño máximo permitido para cada PDF. |
+| `API_KEY` | Clave necesaria para usar el endpoint protegido de subida. |
+| `SESSION_COOKIE_NAME` | Nombre de la cookie de sesión temporal. |
+| `SESSION_TTL_MINUTES` | Duración de la sesión y de la retención temporal de archivos (actualmente en `1` para pruebas). |
+| `SECURE_COOKIES` | Usar `true` cuando la app esté detrás de HTTPS. |
+| `EMBEDDING_MODEL` | Modelo de embeddings de FastEmbed usado para vectorizar los chunks. Por defecto, un modelo multilingüe. |
 
 ## Endpoints
 
@@ -67,13 +82,14 @@ Respuesta esperada:
 
 ### `POST /documents/upload`
 
-Sube un PDF, lo valida, extrae su texto, lo divide en chunks, genera un embedding por chunk y guarda un JSON procesado asociado a una sesión temporal.
+Sube un PDF, lo valida, extrae y normaliza su texto, lo divide en chunks, genera un embedding por chunk y guarda un JSON procesado asociado a una sesión temporal.
 
 #### Requisitos
 
 - Header `X-API-Key`
 - `multipart/form-data`
-- campo `file` de tipo archivo
+- Campo `file` de tipo archivo
+- Límite de `10 peticiones/minuto` por IP
 
 #### Ejemplo de respuesta
 
@@ -96,15 +112,16 @@ Sube un PDF, lo valida, extrae su texto, lo divide en chunks, genera un embeddin
 
 Al subir un PDF, la API:
 
-- valida que el archivo sea un PDF real mediante magic number (`%PDF-`);
-- comprueba el tamaño máximo permitido;
-- genera un nombre seguro con UUID;
-- guarda el PDF original en `data/uploads`;
-- extrae texto con `pypdf`;
-- divide el texto en chunks con solapamiento;
-- **genera un embedding vectorial por cada chunk**;
-- crea un JSON procesado en `data/processed` con texto, metadatos y embeddings;
-- asocia el documento a una sesión temporal identificada por cookie.
+1. Limpia documentos expirados de forma preventiva.
+2. Valida que el archivo sea un PDF real mediante magic number (`%PDF-`), no solo por `content-type`.
+3. Comprueba el tamaño máximo permitido.
+4. Genera un nombre seguro con UUID.
+5. Extrae el texto con `pypdf` y lo normaliza (espacios y saltos de línea redundantes).
+6. Divide el texto en chunks con `RecursiveCharacterTextSplitter` (LangChain), priorizando mantener párrafos y frases intactos antes de cortar por longitud fija.
+7. Genera un embedding vectorial local por cada chunk con FastEmbed.
+8. Guarda el PDF original en `data/uploads`.
+9. Crea un JSON procesado en `data/processed` con texto, metadatos y embeddings.
+10. Asocia el documento a una sesión temporal identificada por cookie.
 
 ## Persistencia de datos
 
@@ -134,7 +151,7 @@ Cada chunk contiene:
 - `chunk_index`
 - `length`
 - `text`
-- **`embedding`** (vector generado a partir del texto del chunk)
+- `embedding` (vector generado a partir del texto del chunk)
 
 ## Sesiones temporales
 
@@ -154,27 +171,44 @@ Esto permite separar documentos subidos en diferentes navegadores o sesiones sin
 Los archivos no se conservan indefinidamente.
 
 - Cada documento tiene un `expires_at`.
-- Un scheduler en background ejecuta limpieza periódica.
+- Un scheduler en background ejecuta limpieza periódica cada minuto.
 - Cuando un documento expira, se eliminan:
   - el PDF original,
   - y el JSON procesado asociado (incluyendo sus embeddings).
 
-Este comportamiento está orientado a una demo temporal y reduce la retención innecesaria de archivos. Actualmente `SESSION_TTL_MINUTES` está fijado a `1` minuto de forma intencional para poder probar rápido el ciclo completo de expiración y limpieza durante el desarrollo; se ajustará a un valor de producción más adelante.
+Este comportamiento está orientado a una demo temporal y reduce la retención innecesaria de archivos. `SESSION_TTL_MINUTES` está fijado a `1` minuto de forma intencional durante el desarrollo, para poder probar rápido el ciclo completo de expiración y limpieza; se ajustará a un valor de producción más adelante.
 
 ## Seguridad implementada
 
 - Autenticación por API key mediante `X-API-Key`.
-- Comparación segura de API key con `secrets.compare_digest`.
+- Comparación segura de API key con `secrets.compare_digest` (evita timing attacks).
 - Validación real de PDF por firma binaria, no solo por `content-type`.
 - Límite de tamaño configurable por entorno.
 - Nombres de archivo aleatorios con UUID.
-- Rate limiting por IP con `slowapi`.
+- Rate limiting por IP con `slowapi` (`10/minute` en `/documents/upload`).
 - Cookie de sesión `HttpOnly`.
 - Opción de endurecer cookies con `SECURE_COOKIES=true` en despliegues HTTPS.
 
+## Chunking
+
+El texto se divide con `RecursiveCharacterTextSplitter` de LangChain, que intenta preservar la estructura semántica del documento:
+
+- Prioriza cortar por párrafos (`\n\n`), luego por líneas (`\n`), luego por frases (`. `), y solo como último recurso por caracteres sueltos.
+- `chunk_size=800` y `chunk_overlap=120` por defecto, configurables en `chunking.py`.
+- El overlap asegura que no se pierda contexto en los límites entre chunks.
+
+## Embeddings
+
+Los embeddings se generan localmente con [FastEmbed](https://github.com/qdrant/fastembed), sin depender de una API externa:
+
+- Modelo por defecto multilingüe (español/inglés), configurable vía `EMBEDDING_MODEL`.
+- El modelo se carga una única vez por proceso (`lru_cache`) para evitar reinicializaciones costosas.
+- `embed_texts()` genera embeddings para una lista de chunks manteniendo el orden y alineación con el índice original.
+- `embed_query()` está preparado para la fase de retrieval, generando el embedding de una consulta de usuario.
+
 ## Rate limiting
 
-El proyecto usa `slowapi` como base para limitar peticiones por IP. Si amplías el endpoint de subida o añades nuevos endpoints sensibles, conviene mantener límites explícitos por ruta.
+El proyecto usa `slowapi` para limitar peticiones por IP. Si amplías el endpoint de subida o añades nuevos endpoints sensibles, conviene mantener límites explícitos por ruta.
 
 ## Estructura principal
 
@@ -188,13 +222,14 @@ app/
   documents/
     chunking.py
     cleanup.py
-    embeddings.py
     exceptions.py
     router.py
     schemas.py
     service.py
     session.py
     text_extractor.py
+  embeddings/
+    service.py
   health/
     router.py
   main.py
@@ -215,35 +250,15 @@ La API queda expuesta en:
 
 - `http://127.0.0.1:8001`
 
-## Estado actual del proyecto
-
-Actualmente el proyecto cubre la fase de ingestión documental y generación de embeddings de un sistema RAG:
-
-- upload seguro de PDFs,
-- extracción de texto,
-- chunking,
-- **generación de embeddings por chunk**,
-- persistencia de chunks, embeddings y metadatos,
-- sesiones temporales,
-- retención limitada y cleanup automático.
-
-Todavía no incluye:
-
-- chunking semántico (por párrafos/secciones, en lugar de longitud fija),
-- base de datos vectorial,
-- retrieval semántico,
-- endpoint de consulta tipo `/query`,
-- generación de respuesta con un LLM.
-
 ## Siguientes pasos
 
 Los siguientes bloques naturales del proyecto son:
 
-1. mejorar el chunking para respetar mejor párrafos o secciones y limpiar el texto extraído antes de generar embeddings;
-2. indexar los embeddings en una base vectorial como Qdrant o Chroma;
-3. crear un endpoint `/query`;
-4. conectar el retrieval a un modelo generativo (LLM);
-5. subir `SESSION_TTL_MINUTES` a un valor de producción antes de cualquier demo o despliegue.
+1. Indexar los embeddings en una base de datos vectorial (Qdrant).
+2. Crear un endpoint `/query` que realice retrieval semántico filtrando por sesión/documento.
+3. Conectar el retrieval a un modelo generativo (LLM) para producir respuestas con contexto.
+4. Evaluar y, si procede, mejorar aún más el chunking (detección de secciones/headings).
+5. Subir `SESSION_TTL_MINUTES` a un valor de producción antes de cualquier demo o despliegue.
 
 ## Documentación interactiva
 
