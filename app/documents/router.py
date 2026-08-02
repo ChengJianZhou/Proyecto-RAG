@@ -1,18 +1,25 @@
-from fastapi import APIRouter, UploadFile, File, Response, Cookie
 from typing import Optional
 
+from fastapi import APIRouter, UploadFile, File, Response, Cookie, Security, Request
+
 from app.core.config import settings
+from app.core.security import verify_api_key
+from app.core.limiter import limiter
 from app.documents.schemas import UploadResponse
 from app.documents.service import save_pdf
 from app.documents.session import generate_session_id
+
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
 
 @router.post("/upload", response_model=UploadResponse)
+@limiter.limit("10/minute")
 async def upload_document(
+    request: Request,
     response: Response,
     file: UploadFile = File(...),
+    _: str = Security(verify_api_key),
     session_id: Optional[str] = Cookie(default=None, alias=settings.session_cookie_name),
 ):
     """

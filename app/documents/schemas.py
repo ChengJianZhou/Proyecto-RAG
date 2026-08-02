@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 
 
 class ChunkMetadata(BaseModel):
@@ -14,6 +14,7 @@ class ChunkMetadata(BaseModel):
 class DocumentChunk(BaseModel):
     metadata: ChunkMetadata
     text: str
+    embedding: Optional[List[float]] = None
 
 
 class ProcessedDocument(BaseModel):

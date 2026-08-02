@@ -14,5 +14,6 @@ class Settings(BaseSettings):
     session_ttl_minutes: int = 1
     secure_cookies: bool = False
 
+    embedding_model: str = "intfloat/multilingual-e5-small"
 
 settings = Settings()

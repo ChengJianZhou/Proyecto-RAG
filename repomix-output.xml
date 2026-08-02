@@ -57,6 +57,9 @@ app/
     service.py
     session.py
     text_extractor.py
+  embeddings/
+    __init__.py
+    service.py
   health/
     __init__.py
     router.py
@@ -82,6 +85,137 @@ requirements.txt
 
 <files>
 This section contains the contents of the repository's files.
+
+<file path="app/embeddings/__init__.py">
+
+</file>
+
+<file path="app/embeddings/service.py">
+from functools import lru_cache
+from typing import List
+
+from fastembed import TextEmbedding
+
+from app.core.config import settings
+
+
+# Modelo por defecto recomendado para este proyecto:
+# - multilingüe, útil si tus PDFs pueden estar en español e inglés
+# - más apropiado que usar uno solo-en-inglés
+#
+# Si luego quieres cambiarlo, solo tendrás que tocar el .env
+DEFAULT_EMBEDDING_MODEL = "intfloat/multilingual-e5-small"
+
+
+@lru_cache
+def get_embedding_model() -> TextEmbedding:
+    """
+    Devuelve una única instancia cacheada del modelo de embeddings.
+
+    ¿Por qué usamos cache?
+    - Cargar el modelo cada vez sería lento e ineficiente.
+    - FastEmbed descarga e inicializa el modelo la primera vez.
+    - Después reutilizamos la misma instancia durante la vida del proceso.
+
+    El nombre del modelo se toma desde settings si existe la variable
+    embedding_model; si no, usamos un valor por defecto razonable.
+    """
+    model_name = getattr(settings, "embedding_model", DEFAULT_EMBEDDING_MODEL)
+    return TextEmbedding(model_name=model_name)
+
+
+def embed_texts(texts: List[str]) -> List[List[float]]:
+    """
+    Genera embeddings para una lista de textos.
+
+    Parámetros:
+    - texts: lista de strings, normalmente tus chunks del documento.
+
+    Devuelve:
+    - Lista de embeddings, donde cada embedding es una lista de floats.
+      La posición de cada embedding corresponde a la posición del texto
+      original en la lista de entrada.
+
+    Comportamiento:
+    - Si la lista está vacía, devolvemos [].
+    - Filtramos textos vacíos o solo con espacios para evitar trabajo inútil.
+    - Mantenemos el orden para que luego puedas emparejar chunk[i] con embedding[i].
+    """
+    if not texts:
+        return []
+
+    # Normalizamos entradas:
+    # - convertimos None o falsy a string vacío
+    # - eliminamos espacios sobrantes
+    normalized_texts = [(text or "").strip() for text in texts]
+
+    # Si todos los textos están vacíos, devolvemos embeddings vacíos por consistencia.
+    if not any(normalized_texts):
+        return [[] for _ in normalized_texts]
+
+    model = get_embedding_model()
+
+    # Necesitamos mantener la correspondencia entre índice de chunk e índice de embedding.
+    # Por eso:
+    # 1. separamos los textos válidos,
+    # 2. generamos embeddings solo para esos,
+    # 3. reconstruimos la lista final respetando posiciones.
+    valid_items = [
+        (index, text)
+        for index, text in enumerate(normalized_texts)
+        if text
+    ]
+
+    valid_texts = [text for _, text in valid_items]
+
+    # FastEmbed devuelve un iterable/generador de vectores.
+    # Lo materializamos en lista para poder recorrerlo y convertir cada vector a list[float].
+    generated_embeddings = list(model.embed(valid_texts))
+
+    # Preparamos salida con la misma longitud que texts.
+    # En posiciones vacías dejamos [] para no romper la alineación.
+    result: List[List[float]] = [[] for _ in normalized_texts]
+
+    for (original_index, _), embedding in zip(valid_items, generated_embeddings):
+        result[original_index] = embedding.tolist()
+
+    return result
+
+
+def embed_query(query: str) -> List[float]:
+    """
+    Genera el embedding de una consulta individual.
+
+    Aunque hoy todavía no vayas a implementar retrieval ni /query,
+    esta función te la dejo preparada porque será útil en la siguiente fase.
+
+    Devuelve:
+    - embedding de la query como lista de floats.
+    - si la query está vacía, devuelve [].
+    """
+    cleaned_query = (query or "").strip()
+    if not cleaned_query:
+        return []
+
+    model = get_embedding_model()
+
+    # FastEmbed soporta embedding de consultas.
+    # Algunas familias de modelos diferencian entre documentos y queries.
+    query_vector = next(model.query_embed(cleaned_query))
+
+    return query_vector.tolist()
+</file>
+
+<file path="app/core/__init__.py">
+
+</file>
+
+<file path="app/core/limiter.py">
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+
+limiter = Limiter(key_func=get_remote_address)
+</file>
 
 <file path="app/core/scheduler.py">
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -112,6 +246,56 @@ def stop_scheduler() -> None:
     """
     if scheduler.running:
         scheduler.shutdown()
+</file>
+
+<file path="app/core/security.py">
+import secrets
+from fastapi import Security, HTTPException, status
+from fastapi.security import APIKeyHeader
+from app.core.config import settings
+
+# Declara que esperamos la API key en un header llamado "X-API-Key"
+api_key_header = APIKeyHeader(name="X-API-Key")
+
+async def verify_api_key(api_key: str = Security(api_key_header)):
+    # compare_digest compara en tiempo constante, evitando "timing attacks"
+    # (comparar strings con == normal puede filtrar info por cuánto tarda la comparación)
+    if not secrets.compare_digest(api_key, settings.api_key):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="API key inválida"
+        )
+    return api_key
+</file>
+
+<file path="app/documents/__init__.py">
+
+</file>
+
+<file path="app/documents/chunking.py">
+from typing import List
+
+def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 200) -> List[str]:
+    if not text or not text.strip():
+        return []
+
+    if overlap >= chunk_size:
+        raise ValueError("overlap debe ser menor que chunk_size")
+
+    chunks = []
+    start = 0
+    text_length = len(text)
+
+    while start < text_length:
+        end = start + chunk_size
+        chunk = text[start:end].strip()
+
+        if chunk:
+            chunks.append(chunk)
+
+        start += chunk_size - overlap
+
+    return chunks
 </file>
 
 <file path="app/documents/cleanup.py">
@@ -199,67 +383,6 @@ def from_iso(value: str) -> datetime:
     Convierte una fecha ISO 8601 a datetime.
     """
     return datetime.fromisoformat(value)
-</file>
-
-<file path="app/core/__init__.py">
-
-</file>
-
-<file path="app/core/limiter.py">
-from slowapi import Limiter
-from slowapi.util import get_remote_address
-
-limiter = Limiter(key_func=get_remote_address)
-</file>
-
-<file path="app/core/security.py">
-import secrets
-from fastapi import Security, HTTPException, status
-from fastapi.security import APIKeyHeader
-from app.core.config import settings
-
-# Declara que esperamos la API key en un header llamado "X-API-Key"
-api_key_header = APIKeyHeader(name="X-API-Key")
-
-async def verify_api_key(api_key: str = Security(api_key_header)):
-    # compare_digest compara en tiempo constante, evitando "timing attacks"
-    # (comparar strings con == normal puede filtrar info por cuánto tarda la comparación)
-    if not secrets.compare_digest(api_key, settings.api_key):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="API key inválida"
-        )
-    return api_key
-</file>
-
-<file path="app/documents/__init__.py">
-
-</file>
-
-<file path="app/documents/chunking.py">
-from typing import List
-
-def chunk_text(text: str, chunk_size: int = 1000, overlap: int = 200) -> List[str]:
-    if not text or not text.strip():
-        return []
-
-    if overlap >= chunk_size:
-        raise ValueError("overlap debe ser menor que chunk_size")
-
-    chunks = []
-    start = 0
-    text_length = len(text)
-
-    while start < text_length:
-        end = start + chunk_size
-        chunk = text[start:end].strip()
-
-        if chunk:
-            chunks.append(chunk)
-
-        start += chunk_size - overlap
-
-    return chunks
 </file>
 
 <file path="app/documents/text_extractor.py">
@@ -353,22 +476,54 @@ class FileTooLargeException(HTTPException):
         )
 </file>
 
+<file path=".gitignore">
+__pycache__/
+*.pyc
+.venv/
+.env
+data/uploads/*
+!data/uploads/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+</file>
+
+<file path="docker-compose.yml">
+services:
+  api:
+    build: .
+    ports:
+      - "127.0.0.1:8001:8000"
+    volumes:
+      - ./data/uploads:/app/data/uploads
+      - ./data/processed:/app/data/processed
+      - ./app:/app/app
+    env_file:
+      - .env
+</file>
+
 <file path="app/documents/router.py">
-from fastapi import APIRouter, UploadFile, File, Response, Cookie
 from typing import Optional
 
+from fastapi import APIRouter, UploadFile, File, Response, Cookie, Security, Request
+
 from app.core.config import settings
+from app.core.security import verify_api_key
+from app.core.limiter import limiter
 from app.documents.schemas import UploadResponse
 from app.documents.service import save_pdf
 from app.documents.session import generate_session_id
+
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
 
 @router.post("/upload", response_model=UploadResponse)
+@limiter.limit("10/minute")
 async def upload_document(
+    request: Request,
     response: Response,
     file: UploadFile = File(...),
+    _: str = Security(verify_api_key),
     session_id: Optional[str] = Cookie(default=None, alias=settings.session_cookie_name),
 ):
     """
@@ -396,7 +551,7 @@ async def upload_document(
 
 <file path="app/documents/schemas.py">
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 
 
 class ChunkMetadata(BaseModel):
@@ -411,6 +566,7 @@ class ChunkMetadata(BaseModel):
 class DocumentChunk(BaseModel):
     metadata: ChunkMetadata
     text: str
+    embedding: Optional[List[float]] = None
 
 
 class ProcessedDocument(BaseModel):
@@ -487,31 +643,7 @@ API_KEY=your-secret-api-key-here
 SESSION_COOKIE_NAME=rag_session_id
 SESSION_TTL_MINUTES=120
 SECURE_COOKIES=false
-</file>
-
-<file path=".gitignore">
-__pycache__/
-*.pyc
-.venv/
-.env
-data/uploads/*
-!data/uploads/.gitkeep
-data/processed/*
-!data/processed/.gitkeep
-</file>
-
-<file path="docker-compose.yml">
-services:
-  api:
-    build: .
-    ports:
-      - "127.0.0.1:8001:8000"
-    volumes:
-      - ./data/uploads:/app/data/uploads
-      - ./data/processed:/app/data/processed
-      - ./app:/app/app
-    env_file:
-      - .env
+EMBEDDING_MODEL=intfloat/multilingual-e5-small
 </file>
 
 <file path="requirements.txt">
@@ -522,6 +654,7 @@ pydantic-settings==2.7.0
 pypdf==5.1.0
 slowapi==0.1.9
 apscheduler==3.10.4
+fastembed==0.3.6
 </file>
 
 <file path="app/core/config.py">
@@ -541,6 +674,7 @@ class Settings(BaseSettings):
     session_ttl_minutes: int = 1
     secure_cookies: bool = False
 
+    embedding_model: str = "intfloat/multilingual-e5-small"
 
 settings = Settings()
 </file>
@@ -564,30 +698,39 @@ from app.documents.text_extractor import extract_text_from_pdf_bytes
 from app.documents.chunking import chunk_text
 from app.documents.session import utc_now, get_session_expiration, to_iso
 from app.documents.cleanup import cleanup_expired_documents
+from app.embeddings.service import embed_texts
 
 
+# Firma binaria básica de un PDF real.
+# Nos sirve para validar que el archivo empieza por %PDF-
 PDF_MAGIC_NUMBER = b"%PDF-"
 
 
 def save_processed_document(processed_document: ProcessedDocument) -> str:
     """
     Guarda el documento procesado como JSON en data/processed.
+    Devuelve la ruta del archivo generado.
     """
     processed_dir = Path(settings.processed_dir)
 
+    # Si la ruta existe pero no es una carpeta, detenemos la ejecución
+    # porque guardar ahí produciría errores difíciles de depurar.
     if processed_dir.exists() and not processed_dir.is_dir():
         raise RuntimeError(f"La ruta '{processed_dir}' existe pero no es una carpeta")
 
+    # Creamos la carpeta si todavía no existe.
     processed_dir.mkdir(parents=True, exist_ok=True)
 
+    # El nombre del JSON procesado será el document_id.
     processed_file_path = processed_dir / f"{processed_document.document_id}.json"
 
+    # Pydantic convierte todo el modelo anidado a tipos serializables.
     with processed_file_path.open("w", encoding="utf-8") as f:
         json.dump(
             processed_document.model_dump(),
             f,
             indent=2,
-            ensure_ascii=False
+            ensure_ascii=False,
         )
 
     return str(processed_file_path)
@@ -596,36 +739,63 @@ def save_processed_document(processed_document: ProcessedDocument) -> str:
 async def save_pdf(file: UploadFile, session_id: str) -> UploadResponse:
     """
     Valida, procesa y persiste un PDF subido por un usuario anónimo con sesión temporal.
+
+    Flujo:
+    1. Limpia documentos expirados.
+    2. Lee el contenido del archivo subido.
+    3. Valida que sea un PDF real y que no supere el tamaño máximo.
+    4. Extrae texto.
+    5. Divide el texto en chunks.
+    6. Genera embeddings locales para cada chunk.
+    7. Guarda el PDF original.
+    8. Guarda un JSON procesado con metadatos, chunks y embeddings.
+    9. Devuelve la respuesta del upload.
     """
-    # Antes de procesar nada, borramos documentos caducados (no debería ser necesario, pero por si acaso)
+    # Limpieza preventiva: aunque ya exista scheduler, esto añade una capa
+    # extra de seguridad para no dejar basura si algo se quedó pendiente.
     cleanup_expired_documents()
 
+    # Leemos el contenido completo del archivo subido.
     content = await file.read()
 
-    # Comprobamos que el archivo sea realmente un PDF por su firma binaria
+    # Validación real por magic number.
+    # No confiamos solo en content-type o extensión del archivo.
     if not content.startswith(PDF_MAGIC_NUMBER):
         raise InvalidFileTypeException()
 
-    # Comprobamos que el archivo no supere el tamaño permitido
+    # Validamos tamaño máximo según configuración.
     max_bytes = settings.max_upload_size_mb * 1024 * 1024
     if len(content) > max_bytes:
         raise FileTooLargeException(settings.max_upload_size_mb)
 
-    # Extraemos el texto y lo dividimos en chunks
+    # Extraemos el texto del PDF.
     extracted_text = extract_text_from_pdf_bytes(content)
+
+    # Dividimos el texto en chunks para prepararlo para RAG.
     raw_chunks = chunk_text(extracted_text)
 
+    # Generamos embeddings locales para todos los chunks.
+    # Si no hay chunks, embed_texts devolverá una lista vacía.
+    chunk_embeddings = embed_texts(raw_chunks)
+
     upload_dir = Path(settings.upload_dir)
+
+    # Validamos también la carpeta de uploads por seguridad.
     if upload_dir.exists() and not upload_dir.is_dir():
         raise RuntimeError(f"La ruta '{upload_dir}' existe pero no es una carpeta")
 
+    # Creamos la carpeta si no existe.
     upload_dir.mkdir(parents=True, exist_ok=True)
 
+    # Generamos un ID único para el documento.
     document_id = str(uuid.uuid4())
+
+    # Guardamos el archivo con nombre seguro para evitar problemas
+    # con nombres originales raros o colisiones.
     safe_filename = f"{document_id}.pdf"
     file_path = upload_dir / safe_filename
 
-    # Guardamos el PDF original
+    # Guardamos el PDF original en disco.
     with file_path.open("wb") as f:
         f.write(content)
 
@@ -633,6 +803,9 @@ async def save_pdf(file: UploadFile, session_id: str) -> UploadResponse:
     expires_at = get_session_expiration()
 
     chunks = []
+
+    # Recorremos cada chunk de texto y le asociamos sus metadatos
+    # y su embedding correspondiente.
     for index, chunk_text_value in enumerate(raw_chunks):
         metadata = ChunkMetadata(
             chunk_id=f"{document_id}-{index}",
@@ -643,13 +816,24 @@ async def save_pdf(file: UploadFile, session_id: str) -> UploadResponse:
             length=len(chunk_text_value),
         )
 
+        # Intentamos emparejar el chunk con su embedding por posición.
+        # Si por cualquier motivo no existe, lo dejamos como None
+        # para que el sistema no reviente y podamos depurarlo.
+        embedding_value = (
+            chunk_embeddings[index]
+            if index < len(chunk_embeddings) and chunk_embeddings[index]
+            else None
+        )
+
         chunk = DocumentChunk(
             metadata=metadata,
             text=chunk_text_value,
+            embedding=embedding_value,
         )
 
         chunks.append(chunk)
 
+    # Construimos la representación procesada completa del documento.
     processed_document = ProcessedDocument(
         document_id=document_id,
         session_id=session_id,
@@ -662,8 +846,10 @@ async def save_pdf(file: UploadFile, session_id: str) -> UploadResponse:
         chunks=chunks,
     )
 
+    # Guardamos el JSON procesado.
     processed_file_path = save_processed_document(processed_document)
 
+    # Respuesta ligera para el cliente.
     return UploadResponse(
         document_id=document_id,
         session_id=session_id,
@@ -681,50 +867,252 @@ async def save_pdf(file: UploadFile, session_id: str) -> UploadResponse:
 <file path="README.md">
 # RAG Project
 
+Backend en FastAPI para ingestión de PDFs orientado a un pipeline RAG. Actualmente permite subir documentos PDF, validar su formato, extraer texto, dividirlo en chunks y persistir una representación procesada en JSON para preparar las siguientes fases de embeddings y retrieval.
+
 ## Cómo arrancar
 
 1. Clonar el repo.
-2. Crear el archivo `.env` a partir de `.env.example` y generar una API key:
+2. Crear el archivo `.env` a partir de `.env.example`.
+3. Generar una API key:
+   ```bash
    python -c "import secrets; print(secrets.token_urlsafe(32))"
-3. Ejecutar:
+   ```
+4. Levantar el proyecto:
+   ```bash
    docker compose up --build
-4. Verificar salud:
-   curl.exe http://localhost:8000/health
-5. Subir un PDF (requiere API key):
-   curl.exe -H "X-API-Key: TU_API_KEY" -F "file=@ejemplo.pdf" http://localhost:8000/documents/upload
-6. Los archivos quedan en ./data/uploads con nombre aleatorio (UUID)
+   ```
+5. Verificar salud:
+   ```bash
+   curl.exe http://127.0.0.1:8001/health
+   ```
+6. Subir un PDF:
+   ```bash
+   curl.exe -H "X-API-Key: TU_API_KEY" -F "file=@ejemplo.pdf" http://127.0.0.1:8001/documents/upload
+   ```
 
-## Seguridad implementada
+## Configuración
 
-- Autenticación por API key (header `X-API-Key`) en el endpoint de subida.
-- Validación real de PDF mediante magic number (`%PDF-`), no solo por content-type declarado por el cliente.
-- Límite de tamaño de archivo configurable (`MAX_UPLOAD_SIZE_MB` en `.env`).
-- Nombres de archivo aleatorios (UUID) para evitar path traversal y colisiones.
-- Rate limiting: máximo 20 subidas por hora por IP.
+Ejemplo de `.env`:
 
-## Procesamiento actual
+```env
+APP_NAME=RAG API
+UPLOAD_DIR=data/uploads
+PROCESSED_DIR=data/processed
+MAX_UPLOAD_SIZE_MB=20
+API_KEY=your-secret-api-key-here
+SESSION_COOKIE_NAME=rag_session_id
+SESSION_TTL_MINUTES=120
+SECURE_COOKIES=false
+```
+
+### Variables disponibles
+
+- `APP_NAME`: nombre de la aplicación.
+- `UPLOAD_DIR`: carpeta donde se guardan los PDFs originales.
+- `PROCESSED_DIR`: carpeta donde se guardan los JSON procesados.
+- `MAX_UPLOAD_SIZE_MB`: tamaño máximo permitido para cada PDF.
+- `API_KEY`: clave necesaria para usar el endpoint protegido de subida.
+- `SESSION_COOKIE_NAME`: nombre de la cookie de sesión temporal.
+- `SESSION_TTL_MINUTES`: duración de la sesión y de la retención temporal de archivos.
+- `SECURE_COOKIES`: usar `true` cuando la app esté detrás de HTTPS.
+
+## Endpoints
+
+### `GET /health`
+
+Devuelve el estado básico del servicio.
+
+Respuesta esperada:
+
+```json
+{
+  "status": "ok"
+}
+```
+
+### `POST /documents/upload`
+
+Sube un PDF, lo valida, extrae su texto, lo divide en chunks y guarda un JSON procesado asociado a una sesión temporal.
+
+#### Requisitos
+
+- Header `X-API-Key`
+- `multipart/form-data`
+- campo `file` de tipo archivo
+
+#### Ejemplo de respuesta
+
+```json
+{
+  "document_id": "171691e0-9d6a-45f9-990c-30fe5ef93e45",
+  "session_id": "5a6d0d26-1c28-4ef1-9a0e-2c0fa5ff1234",
+  "filename": "171691e0-9d6a-45f9-990c-30fe5ef93e45.pdf",
+  "size_kb": 419.44,
+  "path": "data/uploads/171691e0-9d6a-45f9-990c-30fe5ef93e45.pdf",
+  "created_at": "2026-08-01T01:20:00+00:00",
+  "expires_at": "2026-08-01T03:20:00+00:00",
+  "extracted_characters": 2702,
+  "chunks": 4,
+  "processed_file": "data/processed/171691e0-9d6a-45f9-990c-30fe5ef93e45.json"
+}
+```
+
+## Flujo actual
 
 Al subir un PDF, la API:
 
-- valida que sea un PDF real,
-- guarda el archivo original en `data/uploads`,
-- extrae el texto con `pypdf`,
-- divide el texto en chunks,
-- guarda un JSON procesado en `data/processed`.
+- valida que el archivo sea un PDF real mediante magic number (`%PDF-`);
+- comprueba el tamaño máximo permitido;
+- genera un nombre seguro con UUID;
+- guarda el PDF original en `data/uploads`;
+- extrae texto con `pypdf`;
+- divide el texto en chunks con solapamiento;
+- crea un JSON procesado en `data/processed`;
+- asocia el documento a una sesión temporal identificada por cookie.
 
-Cada archivo JSON contiene:
-- `document_id`,
-- metadatos de cada chunk,
-- texto de cada chunk,
-- número total de caracteres extraídos,
-- número total de chunks.
+## Persistencia de datos
 
-Esto deja preparado el siguiente paso del pipeline RAG: generación de embeddings e indexación en una base vectorial.
+Actualmente el proyecto guarda dos tipos de datos:
+
+- `data/uploads`: PDF original subido por el usuario.
+- `data/processed`: JSON procesado con metadatos y chunks.
+
+Cada documento procesado incluye, como mínimo:
+
+- `document_id`
+- `session_id`
+- `filename`
+- `original_path`
+- `created_at`
+- `expires_at`
+- `extracted_characters`
+- `chunks_count`
+- `chunks`
+
+Cada chunk contiene:
+
+- `chunk_id`
+- `document_id`
+- `session_id`
+- `filename`
+- `chunk_index`
+- `length`
+- `text`
+
+## Sesiones temporales
+
+La API usa una cookie temporal para asociar documentos a una sesión anónima.
+
+### Comportamiento
+
+- Si no existe cookie, se crea una nueva sesión.
+- Si ya existe cookie válida, se reutiliza esa sesión.
+- La cookie expira según `SESSION_TTL_MINUTES`.
+- La sesión está pensada como temporal, no como autenticación de usuarios.
+
+Esto permite separar documentos subidos en diferentes navegadores o sesiones sin implementar todavía cuentas de usuario.
+
+## Borrado automático
+
+Los archivos no se conservan indefinidamente.
+
+- Cada documento tiene un `expires_at`.
+- Un scheduler en background ejecuta limpieza periódica.
+- Cuando un documento expira, se eliminan:
+  - el PDF original,
+  - y el JSON procesado asociado.
+
+Este comportamiento está orientado a una demo temporal y reduce la retención innecesaria de archivos.
+
+## Seguridad implementada
+
+- Autenticación por API key mediante `X-API-Key`.
+- Comparación segura de API key con `secrets.compare_digest`.
+- Validación real de PDF por firma binaria, no solo por `content-type`.
+- Límite de tamaño configurable por entorno.
+- Nombres de archivo aleatorios con UUID.
+- Rate limiting por IP con `slowapi`.
+- Cookie de sesión `HttpOnly`.
+- Opción de endurecer cookies con `SECURE_COOKIES=true` en despliegues HTTPS.
+
+## Rate limiting
+
+El proyecto usa `slowapi` como base para limitar peticiones por IP. Si amplías el endpoint de subida o añades nuevos endpoints sensibles, conviene mantener límites explícitos por ruta.
+
+## Estructura principal
+
+```text
+app/
+  core/
+    config.py
+    limiter.py
+    scheduler.py
+    security.py
+  documents/
+    chunking.py
+    cleanup.py
+    exceptions.py
+    router.py
+    schemas.py
+    service.py
+    session.py
+    text_extractor.py
+  health/
+    router.py
+  main.py
+data/
+  uploads/
+  processed/
+```
+
+## Docker
+
+El proyecto usa Docker Compose y monta volúmenes para persistir los datos procesados:
+
+- `./data/uploads:/app/data/uploads`
+- `./data/processed:/app/data/processed`
+- `./app:/app/app`
+
+La API queda expuesta en:
+
+- `http://127.0.0.1:8001`
+
+## Estado actual del proyecto
+
+Actualmente el proyecto cubre la fase de ingestión documental de un sistema RAG:
+
+- upload seguro de PDFs,
+- extracción de texto,
+- chunking,
+- persistencia de chunks y metadatos,
+- sesiones temporales,
+- retención limitada y cleanup automático.
+
+Todavía no incluye:
+
+- embeddings,
+- base de datos vectorial,
+- retrieval semántico,
+- endpoint de consulta tipo `/query`,
+- generación de respuesta con un LLM.
+
+## Siguientes pasos
+
+Los siguientes bloques naturales del proyecto son:
+
+1. mejorar el chunking para respetar mejor párrafos o secciones;
+2. generar embeddings por chunk;
+3. indexar en una base vectorial como Qdrant o Chroma;
+4. crear un endpoint `/query`;
+5. conectar el retrieval a un modelo generativo.
 
 ## Documentación interactiva
 
-Disponible en http://localhost:8000/docs
-Nota: en /docs, usa el botón "Authorize" para introducir tu X-API-Key antes de probar /documents/upload.
+Disponible en:
+
+- [http://127.0.0.1:8001/docs](http://127.0.0.1:8001/docs)
+
+Si el endpoint requiere API key, usa el botón **Authorize** en Swagger UI para introducir `X-API-Key`.
 </file>
 
 </files>

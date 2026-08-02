@@ -1,6 +1,6 @@
 # RAG Project
 
-Backend en FastAPI para ingestión de PDFs orientado a un pipeline RAG. Actualmente permite subir documentos PDF, validar su formato, extraer texto, dividirlo en chunks y persistir una representación procesada en JSON para preparar las siguientes fases de embeddings y retrieval.
+Backend en FastAPI para un pipeline RAG. Actualmente permite subir documentos PDF, validar su formato, extraer texto, dividirlo en chunks, generar embeddings por chunk y persistir una representación procesada en JSON, como preparación para las siguientes fases de indexación vectorial y retrieval.
 
 ## Cómo arrancar
 
@@ -34,9 +34,11 @@ PROCESSED_DIR=data/processed
 MAX_UPLOAD_SIZE_MB=20
 API_KEY=your-secret-api-key-here
 SESSION_COOKIE_NAME=rag_session_id
-SESSION_TTL_MINUTES=120
+SESSION_TTL_MINUTES=1
 SECURE_COOKIES=false
 ```
+
+> **Nota:** `SESSION_TTL_MINUTES=1` está fijado así temporalmente para pruebas de desarrollo (permite validar rápido el ciclo de expiración y limpieza automática). Antes de cualquier demo o entorno real, debe subirse a un valor razonable (p. ej. `120`).
 
 ### Variables disponibles
 
@@ -46,7 +48,7 @@ SECURE_COOKIES=false
 - `MAX_UPLOAD_SIZE_MB`: tamaño máximo permitido para cada PDF.
 - `API_KEY`: clave necesaria para usar el endpoint protegido de subida.
 - `SESSION_COOKIE_NAME`: nombre de la cookie de sesión temporal.
-- `SESSION_TTL_MINUTES`: duración de la sesión y de la retención temporal de archivos.
+- `SESSION_TTL_MINUTES`: duración de la sesión y de la retención temporal de archivos (actualmente en `1` para pruebas).
 - `SECURE_COOKIES`: usar `true` cuando la app esté detrás de HTTPS.
 
 ## Endpoints
@@ -65,7 +67,7 @@ Respuesta esperada:
 
 ### `POST /documents/upload`
 
-Sube un PDF, lo valida, extrae su texto, lo divide en chunks y guarda un JSON procesado asociado a una sesión temporal.
+Sube un PDF, lo valida, extrae su texto, lo divide en chunks, genera un embedding por chunk y guarda un JSON procesado asociado a una sesión temporal.
 
 #### Requisitos
 
@@ -77,16 +79,16 @@ Sube un PDF, lo valida, extrae su texto, lo divide en chunks y guarda un JSON pr
 
 ```json
 {
-  "document_id": "171691e0-9d6a-45f9-990c-30fe5ef93e45",
-  "session_id": "5a6d0d26-1c28-4ef1-9a0e-2c0fa5ff1234",
-  "filename": "171691e0-9d6a-45f9-990c-30fe5ef93e45.pdf",
-  "size_kb": 419.44,
-  "path": "data/uploads/171691e0-9d6a-45f9-990c-30fe5ef93e45.pdf",
-  "created_at": "2026-08-01T01:20:00+00:00",
-  "expires_at": "2026-08-01T03:20:00+00:00",
-  "extracted_characters": 2702,
-  "chunks": 4,
-  "processed_file": "data/processed/171691e0-9d6a-45f9-990c-30fe5ef93e45.json"
+  "document_id": "9a85b5dd-ac81-48a3-add5-e1d61d0589b5",
+  "session_id": "86b983af-3c14-4f92-86c1-4596916e2fc6",
+  "filename": "9a85b5dd-ac81-48a3-add5-e1d61d0589b5.pdf",
+  "size_kb": 46.98,
+  "path": "data/uploads/9a85b5dd-ac81-48a3-add5-e1d61d0589b5.pdf",
+  "created_at": "2026-08-02T16:29:17.171548+00:00",
+  "expires_at": "2026-08-02T16:30:17.171553+00:00",
+  "extracted_characters": 4289,
+  "chunks": 6,
+  "processed_file": "data/processed/9a85b5dd-ac81-48a3-add5-e1d61d0589b5.json"
 }
 ```
 
@@ -100,7 +102,8 @@ Al subir un PDF, la API:
 - guarda el PDF original en `data/uploads`;
 - extrae texto con `pypdf`;
 - divide el texto en chunks con solapamiento;
-- crea un JSON procesado en `data/processed`;
+- **genera un embedding vectorial por cada chunk**;
+- crea un JSON procesado en `data/processed` con texto, metadatos y embeddings;
 - asocia el documento a una sesión temporal identificada por cookie.
 
 ## Persistencia de datos
@@ -108,7 +111,7 @@ Al subir un PDF, la API:
 Actualmente el proyecto guarda dos tipos de datos:
 
 - `data/uploads`: PDF original subido por el usuario.
-- `data/processed`: JSON procesado con metadatos y chunks.
+- `data/processed`: JSON procesado con metadatos, chunks y embeddings.
 
 Cada documento procesado incluye, como mínimo:
 
@@ -131,6 +134,7 @@ Cada chunk contiene:
 - `chunk_index`
 - `length`
 - `text`
+- **`embedding`** (vector generado a partir del texto del chunk)
 
 ## Sesiones temporales
 
@@ -153,9 +157,9 @@ Los archivos no se conservan indefinidamente.
 - Un scheduler en background ejecuta limpieza periódica.
 - Cuando un documento expira, se eliminan:
   - el PDF original,
-  - y el JSON procesado asociado.
+  - y el JSON procesado asociado (incluyendo sus embeddings).
 
-Este comportamiento está orientado a una demo temporal y reduce la retención innecesaria de archivos.
+Este comportamiento está orientado a una demo temporal y reduce la retención innecesaria de archivos. Actualmente `SESSION_TTL_MINUTES` está fijado a `1` minuto de forma intencional para poder probar rápido el ciclo completo de expiración y limpieza durante el desarrollo; se ajustará a un valor de producción más adelante.
 
 ## Seguridad implementada
 
@@ -184,6 +188,7 @@ app/
   documents/
     chunking.py
     cleanup.py
+    embeddings.py
     exceptions.py
     router.py
     schemas.py
@@ -212,18 +217,19 @@ La API queda expuesta en:
 
 ## Estado actual del proyecto
 
-Actualmente el proyecto cubre la fase de ingestión documental de un sistema RAG:
+Actualmente el proyecto cubre la fase de ingestión documental y generación de embeddings de un sistema RAG:
 
 - upload seguro de PDFs,
 - extracción de texto,
 - chunking,
-- persistencia de chunks y metadatos,
+- **generación de embeddings por chunk**,
+- persistencia de chunks, embeddings y metadatos,
 - sesiones temporales,
 - retención limitada y cleanup automático.
 
 Todavía no incluye:
 
-- embeddings,
+- chunking semántico (por párrafos/secciones, en lugar de longitud fija),
 - base de datos vectorial,
 - retrieval semántico,
 - endpoint de consulta tipo `/query`,
@@ -233,11 +239,11 @@ Todavía no incluye:
 
 Los siguientes bloques naturales del proyecto son:
 
-1. mejorar el chunking para respetar mejor párrafos o secciones;
-2. generar embeddings por chunk;
-3. indexar en una base vectorial como Qdrant o Chroma;
-4. crear un endpoint `/query`;
-5. conectar el retrieval a un modelo generativo.
+1. mejorar el chunking para respetar mejor párrafos o secciones y limpiar el texto extraído antes de generar embeddings;
+2. indexar los embeddings en una base vectorial como Qdrant o Chroma;
+3. crear un endpoint `/query`;
+4. conectar el retrieval a un modelo generativo (LLM);
+5. subir `SESSION_TTL_MINUTES` a un valor de producción antes de cualquier demo o despliegue.
 
 ## Documentación interactiva
 
