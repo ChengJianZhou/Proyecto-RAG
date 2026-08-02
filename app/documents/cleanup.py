@@ -3,11 +3,13 @@ import json
 
 from app.core.config import settings
 from app.documents.session import utc_now, from_iso
+from app.vectorstore.qdrant import delete_document
 
 
 def cleanup_expired_documents() -> int:
     """
-    Elimina JSON procesados y PDFs originales expirados.
+    Elimina JSON procesados, PDFs originales y vectores en Qdrant
+    de documentos expirados.
     Devuelve cuántos documentos procesados ha eliminado.
     """
     processed_dir = Path(settings.processed_dir)
@@ -25,6 +27,7 @@ def cleanup_expired_documents() -> int:
 
             expires_at = data.get("expires_at")
             original_path = data.get("original_path")
+            document_id = data.get("document_id")
 
             if not expires_at:
                 continue
@@ -32,6 +35,9 @@ def cleanup_expired_documents() -> int:
             if from_iso(expires_at) <= now:
                 if original_path:
                     Path(original_path).unlink(missing_ok=True)
+
+                if document_id:
+                    delete_document(document_id)
 
                 json_file.unlink(missing_ok=True)
                 deleted_count += 1

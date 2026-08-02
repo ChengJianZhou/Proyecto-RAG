@@ -16,4 +16,7 @@ class Settings(BaseSettings):
 
     embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 
+    qdrant_url: str = "http://qdrant:6333"
+    qdrant_collection: str = "documents"
+
 settings = Settings()

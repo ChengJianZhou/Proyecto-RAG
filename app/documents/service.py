@@ -17,6 +17,7 @@ from app.documents.chunking import chunk_text
 from app.documents.session import utc_now, get_session_expiration, to_iso
 from app.documents.cleanup import cleanup_expired_documents
 from app.embeddings.service import embed_texts
+from app.vectorstore.qdrant import upsert_chunks
 
 
 # Firma binaria básica de un PDF real.
@@ -150,6 +151,8 @@ async def save_pdf(file: UploadFile, session_id: str) -> UploadResponse:
         )
 
         chunks.append(chunk)
+    # Indexamos los chunks con embedding en Qdrant para retrieval semántico.
+    upsert_chunks(chunks)
 
     # Construimos la representación procesada completa del documento.
     processed_document = ProcessedDocument(
