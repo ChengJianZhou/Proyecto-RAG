@@ -86,126 +86,6 @@ requirements.txt
 <files>
 This section contains the contents of the repository's files.
 
-<file path="app/embeddings/__init__.py">
-
-</file>
-
-<file path="app/embeddings/service.py">
-from functools import lru_cache
-from typing import List
-
-from fastembed import TextEmbedding
-
-from app.core.config import settings
-
-
-# Modelo por defecto recomendado para este proyecto:
-# - multilingüe, útil si tus PDFs pueden estar en español e inglés
-# - más apropiado que usar uno solo-en-inglés
-#
-# Si luego quieres cambiarlo, solo tendrás que tocar el .env
-DEFAULT_EMBEDDING_MODEL = "intfloat/multilingual-e5-small"
-
-
-@lru_cache
-def get_embedding_model() -> TextEmbedding:
-    """
-    Devuelve una única instancia cacheada del modelo de embeddings.
-
-    ¿Por qué usamos cache?
-    - Cargar el modelo cada vez sería lento e ineficiente.
-    - FastEmbed descarga e inicializa el modelo la primera vez.
-    - Después reutilizamos la misma instancia durante la vida del proceso.
-
-    El nombre del modelo se toma desde settings si existe la variable
-    embedding_model; si no, usamos un valor por defecto razonable.
-    """
-    model_name = getattr(settings, "embedding_model", DEFAULT_EMBEDDING_MODEL)
-    return TextEmbedding(model_name=model_name)
-
-
-def embed_texts(texts: List[str]) -> List[List[float]]:
-    """
-    Genera embeddings para una lista de textos.
-
-    Parámetros:
-    - texts: lista de strings, normalmente tus chunks del documento.
-
-    Devuelve:
-    - Lista de embeddings, donde cada embedding es una lista de floats.
-      La posición de cada embedding corresponde a la posición del texto
-      original en la lista de entrada.
-
-    Comportamiento:
-    - Si la lista está vacía, devolvemos [].
-    - Filtramos textos vacíos o solo con espacios para evitar trabajo inútil.
-    - Mantenemos el orden para que luego puedas emparejar chunk[i] con embedding[i].
-    """
-    if not texts:
-        return []
-
-    # Normalizamos entradas:
-    # - convertimos None o falsy a string vacío
-    # - eliminamos espacios sobrantes
-    normalized_texts = [(text or "").strip() for text in texts]
-
-    # Si todos los textos están vacíos, devolvemos embeddings vacíos por consistencia.
-    if not any(normalized_texts):
-        return [[] for _ in normalized_texts]
-
-    model = get_embedding_model()
-
-    # Necesitamos mantener la correspondencia entre índice de chunk e índice de embedding.
-    # Por eso:
-    # 1. separamos los textos válidos,
-    # 2. generamos embeddings solo para esos,
-    # 3. reconstruimos la lista final respetando posiciones.
-    valid_items = [
-        (index, text)
-        for index, text in enumerate(normalized_texts)
-        if text
-    ]
-
-    valid_texts = [text for _, text in valid_items]
-
-    # FastEmbed devuelve un iterable/generador de vectores.
-    # Lo materializamos en lista para poder recorrerlo y convertir cada vector a list[float].
-    generated_embeddings = list(model.embed(valid_texts))
-
-    # Preparamos salida con la misma longitud que texts.
-    # En posiciones vacías dejamos [] para no romper la alineación.
-    result: List[List[float]] = [[] for _ in normalized_texts]
-
-    for (original_index, _), embedding in zip(valid_items, generated_embeddings):
-        result[original_index] = embedding.tolist()
-
-    return result
-
-
-def embed_query(query: str) -> List[float]:
-    """
-    Genera el embedding de una consulta individual.
-
-    Aunque hoy todavía no vayas a implementar retrieval ni /query,
-    esta función te la dejo preparada porque será útil en la siguiente fase.
-
-    Devuelve:
-    - embedding de la query como lista de floats.
-    - si la query está vacía, devuelve [].
-    """
-    cleaned_query = (query or "").strip()
-    if not cleaned_query:
-        return []
-
-    model = get_embedding_model()
-
-    # FastEmbed soporta embedding de consultas.
-    # Algunas familias de modelos diferencian entre documentos y queries.
-    query_vector = next(model.query_embed(cleaned_query))
-
-    return query_vector.tolist()
-</file>
-
 <file path="app/core/__init__.py">
 
 </file>
@@ -401,6 +281,125 @@ def extract_text_from_pdf_bytes(content: bytes) -> str:
     return "\n\n".join(pages_text)
 </file>
 
+<file path="app/embeddings/__init__.py">
+
+</file>
+
+<file path="app/embeddings/service.py">
+from functools import lru_cache
+from typing import List
+
+from fastembed import TextEmbedding
+
+from app.core.config import settings
+
+
+# Modelo por defecto recomendado para este proyecto:
+# - multilingüe, útil si tus PDFs pueden estar en español e inglés
+# - más apropiado que usar uno solo-en-inglés
+#
+# Si luego quieres cambiarlo, solo tendrás que tocar el .env
+DEFAULT_EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+
+@lru_cache
+def get_embedding_model() -> TextEmbedding:
+    """
+    Devuelve una única instancia cacheada del modelo de embeddings.
+
+    ¿Por qué usamos cache?
+    - Cargar el modelo cada vez sería lento e ineficiente.
+    - FastEmbed descarga e inicializa el modelo la primera vez.
+    - Después reutilizamos la misma instancia durante la vida del proceso.
+
+    El nombre del modelo se toma desde settings si existe la variable
+    embedding_model; si no, usamos un valor por defecto razonable.
+    """
+    model_name = getattr(settings, "embedding_model", DEFAULT_EMBEDDING_MODEL)
+    return TextEmbedding(model_name=model_name)
+
+
+def embed_texts(texts: List[str]) -> List[List[float]]:
+    """
+    Genera embeddings para una lista de textos.
+
+    Parámetros:
+    - texts: lista de strings, normalmente tus chunks del documento.
+
+    Devuelve:
+    - Lista de embeddings, donde cada embedding es una lista de floats.
+      La posición de cada embedding corresponde a la posición del texto
+      original en la lista de entrada.
+
+    Comportamiento:
+    - Si la lista está vacía, devolvemos [].
+    - Filtramos textos vacíos o solo con espacios para evitar trabajo inútil.
+    - Mantenemos el orden para que luego puedas emparejar chunk[i] con embedding[i].
+    """
+    if not texts:
+        return []
+
+    # Normalizamos entradas:
+    # - convertimos None o falsy a string vacío
+    # - eliminamos espacios sobrantes
+    normalized_texts = [(text or "").strip() for text in texts]
+
+    # Si todos los textos están vacíos, devolvemos embeddings vacíos por consistencia.
+    if not any(normalized_texts):
+        return [[] for _ in normalized_texts]
+
+    model = get_embedding_model()
+
+    # Necesitamos mantener la correspondencia entre índice de chunk e índice de embedding.
+    # Por eso:
+    # 1. separamos los textos válidos,
+    # 2. generamos embeddings solo para esos,
+    # 3. reconstruimos la lista final respetando posiciones.
+    valid_items = [
+        (index, text)
+        for index, text in enumerate(normalized_texts)
+        if text
+    ]
+
+    valid_texts = [text for _, text in valid_items]
+
+    # FastEmbed devuelve un iterable/generador de vectores.
+    # Lo materializamos en lista para poder recorrerlo y convertir cada vector a list[float].
+    generated_embeddings = list(model.embed(valid_texts))
+
+    # Preparamos salida con la misma longitud que texts.
+    # En posiciones vacías dejamos [] para no romper la alineación.
+    result: List[List[float]] = [[] for _ in normalized_texts]
+
+    for (original_index, _), embedding in zip(valid_items, generated_embeddings):
+        result[original_index] = embedding.tolist()
+
+    return result
+
+
+def embed_query(query: str) -> List[float]:
+    """
+    Genera el embedding de una consulta individual.
+
+    Aunque hoy todavía no vayas a implementar retrieval ni /query,
+    esta función te la dejo preparada porque será útil en la siguiente fase.
+
+    Devuelve:
+    - embedding de la query como lista de floats.
+    - si la query está vacía, devuelve [].
+    """
+    cleaned_query = (query or "").strip()
+    if not cleaned_query:
+        return []
+
+    model = get_embedding_model()
+
+    # FastEmbed soporta embedding de consultas.
+    # Algunas familias de modelos diferencian entre documentos y queries.
+    query_vector = next(model.query_embed(cleaned_query))
+
+    return query_vector.tolist()
+</file>
+
 <file path="app/health/__init__.py">
 
 </file>
@@ -501,6 +500,46 @@ services:
       - .env
 </file>
 
+<file path="app/main.py">
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from slowapi.errors import RateLimitExceeded
+from slowapi import _rate_limit_exceeded_handler
+
+from app.core.config import settings
+from app.core.limiter import limiter
+from app.core.scheduler import start_scheduler, stop_scheduler
+from app.health.router import router as health_router
+from app.documents.router import router as documents_router
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Gestiona tareas de arranque y apagado de la aplicación.
+    """
+    start_scheduler()
+    yield
+    stop_scheduler()
+
+
+app = FastAPI(
+    title=settings.app_name,
+    lifespan=lifespan,
+)
+
+# Registra el limiter en el estado global de la app, requerido por slowapi
+app.state.limiter = limiter
+
+# Respuesta estándar cuando se supera el rate limit
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# Routers de la aplicación
+app.include_router(health_router)
+app.include_router(documents_router)
+</file>
+
 <file path="app/documents/router.py">
 from typing import Optional
 
@@ -594,46 +633,6 @@ class UploadResponse(BaseModel):
     processed_file: str
 </file>
 
-<file path="app/main.py">
-from contextlib import asynccontextmanager
-
-from fastapi import FastAPI
-from slowapi.errors import RateLimitExceeded
-from slowapi import _rate_limit_exceeded_handler
-
-from app.core.config import settings
-from app.core.limiter import limiter
-from app.core.scheduler import start_scheduler, stop_scheduler
-from app.health.router import router as health_router
-from app.documents.router import router as documents_router
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """
-    Gestiona tareas de arranque y apagado de la aplicación.
-    """
-    start_scheduler()
-    yield
-    stop_scheduler()
-
-
-app = FastAPI(
-    title=settings.app_name,
-    lifespan=lifespan,
-)
-
-# Registra el limiter en el estado global de la app, requerido por slowapi
-app.state.limiter = limiter
-
-# Respuesta estándar cuando se supera el rate limit
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-
-# Routers de la aplicación
-app.include_router(health_router)
-app.include_router(documents_router)
-</file>
-
 <file path=".env.example">
 APP_NAME=RAG API
 UPLOAD_DIR=data/uploads
@@ -643,7 +642,7 @@ API_KEY=your-secret-api-key-here
 SESSION_COOKIE_NAME=rag_session_id
 SESSION_TTL_MINUTES=120
 SECURE_COOKIES=false
-EMBEDDING_MODEL=intfloat/multilingual-e5-small
+EMBEDDING_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
 </file>
 
 <file path="requirements.txt">
@@ -867,7 +866,7 @@ async def save_pdf(file: UploadFile, session_id: str) -> UploadResponse:
 <file path="README.md">
 # RAG Project
 
-Backend en FastAPI para ingestión de PDFs orientado a un pipeline RAG. Actualmente permite subir documentos PDF, validar su formato, extraer texto, dividirlo en chunks y persistir una representación procesada en JSON para preparar las siguientes fases de embeddings y retrieval.
+Backend en FastAPI para un pipeline RAG. Actualmente permite subir documentos PDF, validar su formato, extraer texto, dividirlo en chunks, generar embeddings por chunk y persistir una representación procesada en JSON, como preparación para las siguientes fases de indexación vectorial y retrieval.
 
 ## Cómo arrancar
 
@@ -901,9 +900,11 @@ PROCESSED_DIR=data/processed
 MAX_UPLOAD_SIZE_MB=20
 API_KEY=your-secret-api-key-here
 SESSION_COOKIE_NAME=rag_session_id
-SESSION_TTL_MINUTES=120
+SESSION_TTL_MINUTES=1
 SECURE_COOKIES=false
 ```
+
+> **Nota:** `SESSION_TTL_MINUTES=1` está fijado así temporalmente para pruebas de desarrollo (permite validar rápido el ciclo de expiración y limpieza automática). Antes de cualquier demo o entorno real, debe subirse a un valor razonable (p. ej. `120`).
 
 ### Variables disponibles
 
@@ -913,7 +914,7 @@ SECURE_COOKIES=false
 - `MAX_UPLOAD_SIZE_MB`: tamaño máximo permitido para cada PDF.
 - `API_KEY`: clave necesaria para usar el endpoint protegido de subida.
 - `SESSION_COOKIE_NAME`: nombre de la cookie de sesión temporal.
-- `SESSION_TTL_MINUTES`: duración de la sesión y de la retención temporal de archivos.
+- `SESSION_TTL_MINUTES`: duración de la sesión y de la retención temporal de archivos (actualmente en `1` para pruebas).
 - `SECURE_COOKIES`: usar `true` cuando la app esté detrás de HTTPS.
 
 ## Endpoints
@@ -932,7 +933,7 @@ Respuesta esperada:
 
 ### `POST /documents/upload`
 
-Sube un PDF, lo valida, extrae su texto, lo divide en chunks y guarda un JSON procesado asociado a una sesión temporal.
+Sube un PDF, lo valida, extrae su texto, lo divide en chunks, genera un embedding por chunk y guarda un JSON procesado asociado a una sesión temporal.
 
 #### Requisitos
 
@@ -944,16 +945,16 @@ Sube un PDF, lo valida, extrae su texto, lo divide en chunks y guarda un JSON pr
 
 ```json
 {
-  "document_id": "171691e0-9d6a-45f9-990c-30fe5ef93e45",
-  "session_id": "5a6d0d26-1c28-4ef1-9a0e-2c0fa5ff1234",
-  "filename": "171691e0-9d6a-45f9-990c-30fe5ef93e45.pdf",
-  "size_kb": 419.44,
-  "path": "data/uploads/171691e0-9d6a-45f9-990c-30fe5ef93e45.pdf",
-  "created_at": "2026-08-01T01:20:00+00:00",
-  "expires_at": "2026-08-01T03:20:00+00:00",
-  "extracted_characters": 2702,
-  "chunks": 4,
-  "processed_file": "data/processed/171691e0-9d6a-45f9-990c-30fe5ef93e45.json"
+  "document_id": "9a85b5dd-ac81-48a3-add5-e1d61d0589b5",
+  "session_id": "86b983af-3c14-4f92-86c1-4596916e2fc6",
+  "filename": "9a85b5dd-ac81-48a3-add5-e1d61d0589b5.pdf",
+  "size_kb": 46.98,
+  "path": "data/uploads/9a85b5dd-ac81-48a3-add5-e1d61d0589b5.pdf",
+  "created_at": "2026-08-02T16:29:17.171548+00:00",
+  "expires_at": "2026-08-02T16:30:17.171553+00:00",
+  "extracted_characters": 4289,
+  "chunks": 6,
+  "processed_file": "data/processed/9a85b5dd-ac81-48a3-add5-e1d61d0589b5.json"
 }
 ```
 
@@ -967,7 +968,8 @@ Al subir un PDF, la API:
 - guarda el PDF original en `data/uploads`;
 - extrae texto con `pypdf`;
 - divide el texto en chunks con solapamiento;
-- crea un JSON procesado en `data/processed`;
+- **genera un embedding vectorial por cada chunk**;
+- crea un JSON procesado en `data/processed` con texto, metadatos y embeddings;
 - asocia el documento a una sesión temporal identificada por cookie.
 
 ## Persistencia de datos
@@ -975,7 +977,7 @@ Al subir un PDF, la API:
 Actualmente el proyecto guarda dos tipos de datos:
 
 - `data/uploads`: PDF original subido por el usuario.
-- `data/processed`: JSON procesado con metadatos y chunks.
+- `data/processed`: JSON procesado con metadatos, chunks y embeddings.
 
 Cada documento procesado incluye, como mínimo:
 
@@ -998,6 +1000,7 @@ Cada chunk contiene:
 - `chunk_index`
 - `length`
 - `text`
+- **`embedding`** (vector generado a partir del texto del chunk)
 
 ## Sesiones temporales
 
@@ -1020,9 +1023,9 @@ Los archivos no se conservan indefinidamente.
 - Un scheduler en background ejecuta limpieza periódica.
 - Cuando un documento expira, se eliminan:
   - el PDF original,
-  - y el JSON procesado asociado.
+  - y el JSON procesado asociado (incluyendo sus embeddings).
 
-Este comportamiento está orientado a una demo temporal y reduce la retención innecesaria de archivos.
+Este comportamiento está orientado a una demo temporal y reduce la retención innecesaria de archivos. Actualmente `SESSION_TTL_MINUTES` está fijado a `1` minuto de forma intencional para poder probar rápido el ciclo completo de expiración y limpieza durante el desarrollo; se ajustará a un valor de producción más adelante.
 
 ## Seguridad implementada
 
@@ -1051,6 +1054,7 @@ app/
   documents/
     chunking.py
     cleanup.py
+    embeddings.py
     exceptions.py
     router.py
     schemas.py
@@ -1079,18 +1083,19 @@ La API queda expuesta en:
 
 ## Estado actual del proyecto
 
-Actualmente el proyecto cubre la fase de ingestión documental de un sistema RAG:
+Actualmente el proyecto cubre la fase de ingestión documental y generación de embeddings de un sistema RAG:
 
 - upload seguro de PDFs,
 - extracción de texto,
 - chunking,
-- persistencia de chunks y metadatos,
+- **generación de embeddings por chunk**,
+- persistencia de chunks, embeddings y metadatos,
 - sesiones temporales,
 - retención limitada y cleanup automático.
 
 Todavía no incluye:
 
-- embeddings,
+- chunking semántico (por párrafos/secciones, en lugar de longitud fija),
 - base de datos vectorial,
 - retrieval semántico,
 - endpoint de consulta tipo `/query`,
@@ -1100,11 +1105,11 @@ Todavía no incluye:
 
 Los siguientes bloques naturales del proyecto son:
 
-1. mejorar el chunking para respetar mejor párrafos o secciones;
-2. generar embeddings por chunk;
-3. indexar en una base vectorial como Qdrant o Chroma;
-4. crear un endpoint `/query`;
-5. conectar el retrieval a un modelo generativo.
+1. mejorar el chunking para respetar mejor párrafos o secciones y limpiar el texto extraído antes de generar embeddings;
+2. indexar los embeddings en una base vectorial como Qdrant o Chroma;
+3. crear un endpoint `/query`;
+4. conectar el retrieval a un modelo generativo (LLM);
+5. subir `SESSION_TTL_MINUTES` a un valor de producción antes de cualquier demo o despliegue.
 
 ## Documentación interactiva
 

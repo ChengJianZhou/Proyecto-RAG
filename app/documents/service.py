@@ -12,7 +12,7 @@ from app.documents.schemas import (
     ProcessedDocument,
 )
 from app.documents.exceptions import InvalidFileTypeException, FileTooLargeException
-from app.documents.text_extractor import extract_text_from_pdf_bytes
+from app.documents.text_extractor import extract_text_from_pdf_bytes, normalize_text
 from app.documents.chunking import chunk_text
 from app.documents.session import utc_now, get_session_expiration, to_iso
 from app.documents.cleanup import cleanup_expired_documents
@@ -87,7 +87,7 @@ async def save_pdf(file: UploadFile, session_id: str) -> UploadResponse:
         raise FileTooLargeException(settings.max_upload_size_mb)
 
     # Extraemos el texto del PDF.
-    extracted_text = extract_text_from_pdf_bytes(content)
+    extracted_text = normalize_text(extract_text_from_pdf_bytes(content))
 
     # Dividimos el texto en chunks para prepararlo para RAG.
     raw_chunks = chunk_text(extracted_text)
