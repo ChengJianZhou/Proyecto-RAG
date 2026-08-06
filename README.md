@@ -1,6 +1,6 @@
 # RAG Project
 
-Backend en FastAPI para un pipeline de **Retrieval-Augmented Generation (RAG)**. Permite subir documentos PDF, extraer y normalizar su texto, dividirlo en chunks semánticamente coherentes, generar embeddings vectoriales por chunk y persistir el resultado, como base para las siguientes fases de indexación vectorial, retrieval semántico y generación de respuestas con un LLM.
+Backend en FastAPI para un pipeline de **Retrieval-Augmented Generation (RAG)**. Permite subir documentos PDF, extraer y normalizar su texto, dividirlo en chunks semánticamente coherentes, generar embeddings vectoriales por chunk, indexarlos en una base de datos vectorial y responder preguntas en lenguaje natural usando retrieval semántico combinado con un modelo generativo local.
 
 ## Estado del proyecto
 
@@ -11,8 +11,11 @@ Backend en FastAPI para un pipeline de **Retrieval-Augmented Generation (RAG)**.
 | Seguridad (API key, rate limiting, sesiones temporales) | ✅ Completado |
 | Indexación en base de datos vectorial (Qdrant) | ✅ Completado |
 | Borrado automático configurable (`ENABLE_CLEANUP`) | ✅ Completado |
-| Endpoint de consulta `/query` (retrieval semántico) | ⏳ Pendiente |
-| Generación de respuesta con LLM local (Ollama) | ⏳ Pendiente |
+| Endpoint de consulta `/query` (retrieval semántico) | ✅ Completado |
+| Generación de respuesta con LLM local (Ollama) | ✅ Completado |
+| Mejora de chunking/embedding | ⏳ Pendiente (pospuesto intencionalmente) |
+| CORS y rate limiting para exposición pública (frontend portafolio) | ⏳ Pendiente |
+| Simplificación del modelo de sesión para caso de uso de portafolio | ⏳ Pendiente |
 
 ## Cómo arrancar
 
@@ -34,6 +37,10 @@ Backend en FastAPI para un pipeline de **Retrieval-Augmented Generation (RAG)**.
    ```bash
    curl.exe -H "X-API-Key: TU_API_KEY" -F "file=@ejemplo.pdf" http://127.0.0.1:8001/documents/upload
    ```
+7. Hacer una consulta:
+   ```bash
+   curl.exe -H "Content-Type: application/json" -d "{\"question\": \"tu pregunta\"}" http://127.0.0.1:8001/documents/query
+   ```
 
 ## Configuración
 
@@ -52,9 +59,13 @@ EMBEDDING_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
 QDRANT_URL=http://qdrant:6333
 QDRANT_COLLECTION=documents
 ENABLE_CLEANUP=false
+OLLAMA_BASE_URL=http://192.168.1.137:11434
+OLLAMA_MODEL=llama3.2:3b
 ```
 
 > **Nota:** `ENABLE_CLEANUP=false` desactiva por completo el borrado automático de PDFs, JSON procesados y vectores en Qdrant. Esto se usa cuando el proyecto se orienta a un caso de uso de base de conocimiento persistente (por ejemplo, un chatbot de portafolio que responde preguntas sobre el autor), donde los documentos no deben expirar. Para el caso de uso original de subida temporal de documentos por sesión, se puede reactivar con `ENABLE_CLEANUP=true` y ajustar `SESSION_TTL_MINUTES` a un valor de producción razonable.
+
+> **Nota sobre Ollama:** `OLLAMA_BASE_URL` apunta a un servidor Ollama corriendo con GPU en una máquina de la red local, accesible directamente por IP o mediante un dominio interno resuelto por DNS rewrite (no expuesto públicamente en internet). `OLLAMA_MODEL` debe ser un modelo conversacional de propósito general (ej. `llama3.2:3b`); modelos especializados en código (`qwen2.5-coder`, `deepseek-coder`) o de embeddings (`mxbai-embed-large`) no son adecuados para este endpoint.
 
 ### Variables disponibles
 
@@ -72,14 +83,14 @@ ENABLE_CLEANUP=false
 | `QDRANT_URL` | URL del servicio Qdrant. |
 | `QDRANT_COLLECTION` | Nombre de la colección usada en Qdrant. |
 | `ENABLE_CLEANUP` | Activa o desactiva el borrado automático de documentos expirados (scheduler + limpieza preventiva en upload). Por defecto `false`. |
+| `OLLAMA_BASE_URL` | URL del servidor Ollama que genera las respuestas. |
+| `OLLAMA_MODEL` | Modelo conversacional usado para generar respuestas en `/query`. |
 
 ## Endpoints
 
 ### `GET /health`
 
 Devuelve el estado básico del servicio.
-
-Respuesta esperada:
 
 ```json
 {
@@ -115,123 +126,120 @@ Sube un PDF, lo valida, extrae y normaliza su texto, lo divide en chunks, genera
 }
 ```
 
+### `POST /documents/query`
+
+Realiza una consulta en lenguaje natural: genera el embedding de la pregunta, recupera los chunks más relevantes en Qdrant y usa un modelo generativo local (Ollama) para redactar una respuesta basada únicamente en ese contexto.
+
+#### Requisitos
+
+- `application/json`
+- Campo `question` (string, obligatorio)
+- Campo `top_k` (int, opcional, por defecto 5)
+- Límite de `5 peticiones/minuto` por IP
+
+#### Ejemplo de petición
+
+```json
+{
+  "question": "¿Qué tecnologías usa Marcos?",
+  "top_k": 5
+}
+```
+
+#### Ejemplo de respuesta
+
+```json
+{
+  "answer": "Según el contexto proporcionado, Marcos utiliza las siguientes tecnologías: ...",
+  "sources": [
+    "d8a71d38-2021-44c6-a9b0-3d537764a8fd-7",
+    "d8a71d38-2021-44c6-a9b0-3d537764a8fd-0"
+  ]
+}
+```
+
+Si el servidor Ollama no está disponible (por ejemplo, la máquina con GPU está apagada o desconectada de la red), el endpoint responde con `503 Service Unavailable` en vez de un error genérico.
+
 ## Flujo actual
 
-Al subir un PDF, la API:
+### Subida de documento (`/documents/upload`)
 
 1. Limpia documentos expirados de forma preventiva, solo si `ENABLE_CLEANUP=true`.
 2. Valida que el archivo sea un PDF real mediante magic number (`%PDF-`), no solo por `content-type`.
 3. Comprueba el tamaño máximo permitido.
 4. Genera un nombre seguro con UUID.
 5. Extrae el texto con `pypdf` y lo normaliza (espacios y saltos de línea redundantes).
-6. Divide el texto en chunks con `RecursiveCharacterTextSplitter` (LangChain), priorizando mantener párrafos y frases intactos antes de cortar por longitud fija.
+6. Divide el texto en chunks con `RecursiveCharacterTextSplitter` (LangChain).
 7. Genera un embedding vectorial local por cada chunk con FastEmbed.
 8. Indexa los chunks con embedding en Qdrant para retrieval semántico.
-9. Guarda el PDF original en `data/uploads`.
-10. Crea un JSON procesado en `data/processed` con texto, metadatos y embeddings.
-11. Asocia el documento a una sesión temporal identificada por cookie.
+9. Guarda el PDF original y un JSON procesado con texto, metadatos y embeddings.
+10. Asocia el documento a una sesión temporal identificada por cookie.
+
+### Consulta (`/documents/query`)
+
+1. Genera el embedding de la pregunta del usuario.
+2. Busca en Qdrant los `top_k` chunks más similares por distancia coseno.
+3. Construye un prompt con un system prompt restrictivo ("usa solo el contexto proporcionado") y el texto de los chunks recuperados.
+4. Envía el prompt al servidor Ollama vía HTTP y obtiene la respuesta generada.
+5. Devuelve la respuesta junto con los `chunk_id` usados como fuente.
 
 ## Persistencia de datos
-
-Actualmente el proyecto guarda dos tipos de datos:
 
 - `data/uploads`: PDF original subido por el usuario.
 - `data/processed`: JSON procesado con metadatos, chunks y embeddings.
 - Vectores en Qdrant, asociados a cada documento y sesión.
 
-Cada documento procesado incluye, como mínimo:
-
-- `document_id`
-- `session_id`
-- `filename`
-- `original_path`
-- `created_at`
-- `expires_at`
-- `extracted_characters`
-- `chunks_count`
-- `chunks`
-
-Cada chunk contiene:
-
-- `chunk_id`
-- `document_id`
-- `session_id`
-- `filename`
-- `chunk_index`
-- `length`
-- `text`
-- `embedding` (vector generado a partir del texto del chunk)
+Cada documento procesado incluye `document_id`, `session_id`, `filename`, `original_path`, `created_at`, `expires_at`, `extracted_characters`, `chunks_count` y `chunks`. Cada chunk contiene `chunk_id`, `document_id`, `session_id`, `filename`, `chunk_index`, `length`, `text` y `embedding`.
 
 ## Sesiones temporales
 
-La API usa una cookie temporal para asociar documentos a una sesión anónima.
-
-### Comportamiento
-
-- Si no existe cookie, se crea una nueva sesión.
-- Si ya existe cookie válida, se reutiliza esa sesión.
-- La cookie expira según `SESSION_TTL_MINUTES`.
-- La sesión está pensada como temporal, no como autenticación de usuarios.
-
-Esto permite separar documentos subidos en diferentes navegadores o sesiones sin implementar todavía cuentas de usuario.
+La API usa una cookie temporal para asociar documentos a una sesión anónima. Si no existe cookie, se crea una nueva sesión; si ya existe, se reutiliza. Este mecanismo tiene sentido para el caso de uso original de subidas anónimas, pero es candidato a simplificarse en el caso de uso de chatbot de portafolio, donde no hay usuarios subiendo documentos ajenos.
 
 ## Borrado automático
 
-El borrado automático es **opcional** y se controla con la variable `ENABLE_CLEANUP`.
+Controlado por `ENABLE_CLEANUP`:
 
-- Con `ENABLE_CLEANUP=true`:
-  - Cada documento tiene un `expires_at`.
-  - Un scheduler en background ejecuta limpieza periódica cada minuto.
-  - También se ejecuta una limpieza preventiva al recibir cada subida.
-  - Cuando un documento expira, se eliminan el PDF original, el JSON procesado asociado (incluyendo sus embeddings) y los vectores correspondientes en Qdrant.
-- Con `ENABLE_CLEANUP=false` (valor por defecto):
-  - El scheduler no se arranca.
-  - No se ejecuta limpieza preventiva en el upload.
-  - Los documentos y sus vectores se conservan indefinidamente.
+- `true`: scheduler periódico cada minuto + limpieza preventiva en cada upload, eliminando PDFs, JSON y vectores en Qdrant al expirar `expires_at`.
+- `false` (por defecto): los documentos se conservan indefinidamente, pensado para una base de conocimiento persistente.
 
-Este flag permite alternar entre dos casos de uso distintos: una demo temporal orientada a subidas anónimas con retención limitada (`ENABLE_CLEANUP=true`), o una base de conocimiento persistente pensada para un chatbot que responde preguntas sobre un perfil o portafolio concreto (`ENABLE_CLEANUP=false`).
+## Generación con LLM local (Ollama)
+
+- El servidor Ollama corre en una máquina con GPU en la red local, accesible mediante `OLLAMA_BASE_URL`.
+- Se usa el endpoint `/api/generate` de Ollama con `stream=False`.
+- El cliente (`app/generation/service.py`) captura errores de red y los traduce a un `RuntimeError` que el router convierte en `503`, evitando errores 500 poco informativos si el servidor de generación no está disponible.
+- El modelo debe ser conversacional (`llama3.2:3b` recomendado); los modelos de la familia "Coder" están especializados en generación de código y no son adecuados para responder preguntas generales sobre el autor o sus proyectos.
 
 ## Seguridad implementada
 
-- Autenticación por API key mediante `X-API-Key`.
-- Comparación segura de API key con `secrets.compare_digest` (evita timing attacks).
-- Validación real de PDF por firma binaria, no solo por `content-type`.
+- Autenticación por API key mediante `X-API-Key` en `/documents/upload`.
+- Comparación segura de API key con `secrets.compare_digest`.
+- Validación real de PDF por firma binaria.
 - Límite de tamaño configurable por entorno.
 - Nombres de archivo aleatorios con UUID.
-- Rate limiting por IP con `slowapi` (`10/minute` en `/documents/upload`).
-- Cookie de sesión `HttpOnly`.
-- Opción de endurecer cookies con `SECURE_COOKIES=true` en despliegues HTTPS.
+- Rate limiting por IP con `slowapi` (`10/minute` en `/documents/upload`, `5/minute` en `/documents/query`).
+- Cookie de sesión `HttpOnly`, con soporte para `SECURE_COOKIES=true` en HTTPS.
+- El servidor Ollama no se expone públicamente en internet; el acceso está limitado a la red local o mediante DNS interno.
 
 ## Chunking
 
-El texto se divide con `RecursiveCharacterTextSplitter` de LangChain, que intenta preservar la estructura semántica del documento:
-
-- Prioriza cortar por párrafos (`\n\n`), luego por líneas (`\n`), luego por frases (`. `), y solo como último recurso por caracteres sueltos.
-- `chunk_size=800` y `chunk_overlap=120` por defecto, configurables en `chunking.py`.
-- El overlap asegura que no se pierda contexto en los límites entre chunks.
+`RecursiveCharacterTextSplitter` de LangChain, priorizando párrafos, luego líneas, luego frases, y por último caracteres sueltos. `chunk_size=800` y `chunk_overlap=120` por defecto, configurables en `chunking.py`.
 
 ## Embeddings
 
-Los embeddings se generan localmente con [FastEmbed](https://github.com/qdrant/fastembed), sin depender de una API externa:
-
-- Modelo por defecto multilingüe (español/inglés), configurable vía `EMBEDDING_MODEL`.
-- El modelo se carga una única vez por proceso (`lru_cache`) para evitar reinicializaciones costosas.
-- `embed_texts()` genera embeddings para una lista de chunks manteniendo el orden y alineación con el índice original.
-- `embed_query()` está preparado para la fase de retrieval, generando el embedding de una consulta de usuario.
+Generados localmente con [FastEmbed](https://github.com/qdrant/fastembed), sin depender de una API externa. Modelo por defecto multilingüe, configurable vía `EMBEDDING_MODEL`. `embed_texts()` para chunks e `embed_query()` para consultas de usuario.
 
 ## Vectorstore (Qdrant)
 
-Los chunks con embedding se indexan en Qdrant para permitir retrieval semántico:
-
 - Colección configurable vía `QDRANT_COLLECTION`, con distancia coseno.
-- Cada punto guarda como payload el texto del chunk y sus metadatos (`document_id`, `session_id`, `filename`, `chunk_index`, `length`).
-- El ID de cada punto se calcula de forma determinista con `uuid5` a partir del `chunk_id`, evitando duplicados si se reprocesa el mismo documento.
-- `search()` permite filtrar por `session_id` y/o `document_id` al recuperar los chunks más similares a una query.
-- `delete_document()` elimina todos los puntos asociados a un documento, usado por el borrado automático cuando está activado.
+- Cada punto guarda como payload el texto del chunk y sus metadatos.
+- IDs deterministas con `uuid5` a partir del `chunk_id`, evitando duplicados.
+- `search()` permite filtrar por `session_id`/`document_id`.
+- `delete_document()` elimina todos los puntos asociados a un documento (usado solo si `ENABLE_CLEANUP=true`).
+- El cliente se inicializa con un `timeout` explícito para evitar fallos en la creación inicial de la colección, que puede tardar más que el timeout por defecto.
 
 ## Rate limiting
 
-El proyecto usa `slowapi` para limitar peticiones por IP. Si amplías el endpoint de subida o añades nuevos endpoints sensibles, conviene mantener límites explícitos por ruta.
+`slowapi` limita peticiones por IP. `/documents/upload` a `10/minute`, `/documents/query` a `5/minute` (más restrictivo por el coste de cómputo de la generación).
 
 ## Estructura principal
 
@@ -253,6 +261,8 @@ app/
     text_extractor.py
   embeddings/
     service.py
+  generation/
+    service.py
   health/
     router.py
   vectorstore/
@@ -265,30 +275,24 @@ data/
 
 ## Docker
 
-El proyecto usa Docker Compose y monta volúmenes para persistir los datos procesados:
+Docker Compose monta volúmenes para persistir datos:
 
 - `./data/uploads:/app/data/uploads`
 - `./data/processed:/app/data/processed`
 - `./app:/app/app`
 
-La API queda expuesta en:
-
-- `http://127.0.0.1:8001`
+API expuesta en `http://127.0.0.1:8001`.
 
 ## Siguientes pasos
 
-Los siguientes bloques naturales del proyecto son:
-
-1. Crear un endpoint `/query` que realice retrieval semántico filtrando por sesión/documento.
-2. Conectar el retrieval a un modelo generativo (LLM) local vía Ollama para producir respuestas con contexto.
-3. Evaluar y, si procede, mejorar aún más el chunking (detección de secciones/headings).
-4. Simplificar el modelo de sesión para el caso de uso de chatbot de portafolio, donde no hay usuarios anónimos subiendo documentos ajenos.
+1. Ajustar parámetros de generación en Ollama (`temperature`, `keep_alive`) para reducir variabilidad y mejorar tiempos de respuesta en peticiones consecutivas.
+2. Añadir `CORSMiddleware` restringido al dominio del frontend del portafolio.
+3. Endurecer el rate limiting de `/query` pensando en tráfico público real.
+4. Manejar de forma explícita el caso de portátil/GPU desconectado con un mensaje claro para el usuario final.
+5. Simplificar el modelo de sesión para el caso de uso de chatbot de portafolio.
+6. Mejorar chunking y embedding (detección de secciones/headings, modelo de embeddings más preciso).
 
 ## Documentación interactiva
 
-Disponible en:
-
-- [http://127.0.0.1:8001/docs](http://127.0.0.1:8001/docs)
-
-Si el endpoint requiere API key, usa el botón **Authorize** en Swagger UI para introducir `X-API-Key`.
+Disponible en [http://127.0.0.1:8001/docs](http://127.0.0.1:8001/docs). Usa el botón **Authorize** en Swagger UI para introducir `X-API-Key`.
 </content>

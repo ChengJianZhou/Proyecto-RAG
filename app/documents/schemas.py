@@ -40,3 +40,11 @@ class UploadResponse(BaseModel):
     extracted_characters: int
     chunks: int
     processed_file: str
+
+class QueryRequest(BaseModel):
+    question: str
+    top_k: int = 5
+
+class QueryResponse(BaseModel):
+    answer: str
+    sources: List[str]

@@ -1,6 +1,6 @@
 from typing import Optional
 
-from fastapi import APIRouter, UploadFile, File, Response, Cookie, Security, Request
+from fastapi import APIRouter, UploadFile, File, Response, Cookie, Security, Request, HTTPException
 
 from app.core.config import settings
 from app.core.security import verify_api_key
@@ -8,6 +8,8 @@ from app.core.limiter import limiter
 from app.documents.schemas import UploadResponse
 from app.documents.service import save_pdf
 from app.documents.session import generate_session_id
+from app.documents.schemas import UploadResponse, QueryRequest, QueryResponse
+from app.generation.service import answer_question
 
 
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -43,3 +45,13 @@ async def upload_document(
         )
 
     return result
+
+@router.post("/query", response_model=QueryResponse)
+@limiter.limit("5/minute")
+async def query_documents(request: Request, body: QueryRequest):
+    try:
+        answer, sources = answer_question(body.question, body.top_k)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+    return QueryResponse(answer=answer, sources=sources)
