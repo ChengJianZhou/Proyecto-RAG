@@ -21,4 +21,7 @@ class Settings(BaseSettings):
     qdrant_url: str = "http://qdrant:6333"
     qdrant_collection: str = "documents"
 
+    ollama_base_url: str = "http://192.168.1.137:11434"
+    ollama_model: str = "llama3.2:3b"
+
 settings = Settings()
