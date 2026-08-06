@@ -9,9 +9,10 @@ Backend en FastAPI para un pipeline de **Retrieval-Augmented Generation (RAG)**.
 | Ingestión de PDFs (validación, extracción, chunking) | ✅ Completado |
 | Generación de embeddings por chunk | ✅ Completado |
 | Seguridad (API key, rate limiting, sesiones temporales) | ✅ Completado |
-| Indexación en base de datos vectorial (Qdrant) | 🚧 En progreso |
+| Indexación en base de datos vectorial (Qdrant) | ✅ Completado |
+| Borrado automático configurable (`ENABLE_CLEANUP`) | ✅ Completado |
 | Endpoint de consulta `/query` (retrieval semántico) | ⏳ Pendiente |
-| Generación de respuesta con LLM | ⏳ Pendiente |
+| Generación de respuesta con LLM local (Ollama) | ⏳ Pendiente |
 
 ## Cómo arrancar
 
@@ -45,12 +46,15 @@ PROCESSED_DIR=data/processed
 MAX_UPLOAD_SIZE_MB=20
 API_KEY=your-secret-api-key-here
 SESSION_COOKIE_NAME=rag_session_id
-SESSION_TTL_MINUTES=1
+SESSION_TTL_MINUTES=120
 SECURE_COOKIES=false
-EMBEDDING_MODEL=intfloat/multilingual-e5-small
+EMBEDDING_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+QDRANT_URL=http://qdrant:6333
+QDRANT_COLLECTION=documents
+ENABLE_CLEANUP=false
 ```
 
-> **Nota:** `SESSION_TTL_MINUTES=1` está fijado así temporalmente para pruebas de desarrollo (permite validar rápido el ciclo de expiración y limpieza automática). Antes de cualquier demo o entorno real, debe subirse a un valor razonable (p. ej. `120`).
+> **Nota:** `ENABLE_CLEANUP=false` desactiva por completo el borrado automático de PDFs, JSON procesados y vectores en Qdrant. Esto se usa cuando el proyecto se orienta a un caso de uso de base de conocimiento persistente (por ejemplo, un chatbot de portafolio que responde preguntas sobre el autor), donde los documentos no deben expirar. Para el caso de uso original de subida temporal de documentos por sesión, se puede reactivar con `ENABLE_CLEANUP=true` y ajustar `SESSION_TTL_MINUTES` a un valor de producción razonable.
 
 ### Variables disponibles
 
@@ -62,9 +66,12 @@ EMBEDDING_MODEL=intfloat/multilingual-e5-small
 | `MAX_UPLOAD_SIZE_MB` | Tamaño máximo permitido para cada PDF. |
 | `API_KEY` | Clave necesaria para usar el endpoint protegido de subida. |
 | `SESSION_COOKIE_NAME` | Nombre de la cookie de sesión temporal. |
-| `SESSION_TTL_MINUTES` | Duración de la sesión y de la retención temporal de archivos (actualmente en `1` para pruebas). |
+| `SESSION_TTL_MINUTES` | Duración de la sesión y de la retención temporal de archivos (solo aplica si `ENABLE_CLEANUP=true`). |
 | `SECURE_COOKIES` | Usar `true` cuando la app esté detrás de HTTPS. |
 | `EMBEDDING_MODEL` | Modelo de embeddings de FastEmbed usado para vectorizar los chunks. Por defecto, un modelo multilingüe. |
+| `QDRANT_URL` | URL del servicio Qdrant. |
+| `QDRANT_COLLECTION` | Nombre de la colección usada en Qdrant. |
+| `ENABLE_CLEANUP` | Activa o desactiva el borrado automático de documentos expirados (scheduler + limpieza preventiva en upload). Por defecto `false`. |
 
 ## Endpoints
 
@@ -82,7 +89,7 @@ Respuesta esperada:
 
 ### `POST /documents/upload`
 
-Sube un PDF, lo valida, extrae y normaliza su texto, lo divide en chunks, genera un embedding por chunk y guarda un JSON procesado asociado a una sesión temporal.
+Sube un PDF, lo valida, extrae y normaliza su texto, lo divide en chunks, genera un embedding por chunk, lo indexa en Qdrant y guarda un JSON procesado asociado a una sesión temporal.
 
 #### Requisitos
 
@@ -112,16 +119,17 @@ Sube un PDF, lo valida, extrae y normaliza su texto, lo divide en chunks, genera
 
 Al subir un PDF, la API:
 
-1. Limpia documentos expirados de forma preventiva.
+1. Limpia documentos expirados de forma preventiva, solo si `ENABLE_CLEANUP=true`.
 2. Valida que el archivo sea un PDF real mediante magic number (`%PDF-`), no solo por `content-type`.
 3. Comprueba el tamaño máximo permitido.
 4. Genera un nombre seguro con UUID.
 5. Extrae el texto con `pypdf` y lo normaliza (espacios y saltos de línea redundantes).
 6. Divide el texto en chunks con `RecursiveCharacterTextSplitter` (LangChain), priorizando mantener párrafos y frases intactos antes de cortar por longitud fija.
 7. Genera un embedding vectorial local por cada chunk con FastEmbed.
-8. Guarda el PDF original en `data/uploads`.
-9. Crea un JSON procesado en `data/processed` con texto, metadatos y embeddings.
-10. Asocia el documento a una sesión temporal identificada por cookie.
+8. Indexa los chunks con embedding en Qdrant para retrieval semántico.
+9. Guarda el PDF original en `data/uploads`.
+10. Crea un JSON procesado en `data/processed` con texto, metadatos y embeddings.
+11. Asocia el documento a una sesión temporal identificada por cookie.
 
 ## Persistencia de datos
 
@@ -129,6 +137,7 @@ Actualmente el proyecto guarda dos tipos de datos:
 
 - `data/uploads`: PDF original subido por el usuario.
 - `data/processed`: JSON procesado con metadatos, chunks y embeddings.
+- Vectores en Qdrant, asociados a cada documento y sesión.
 
 Cada documento procesado incluye, como mínimo:
 
@@ -168,15 +177,19 @@ Esto permite separar documentos subidos en diferentes navegadores o sesiones sin
 
 ## Borrado automático
 
-Los archivos no se conservan indefinidamente.
+El borrado automático es **opcional** y se controla con la variable `ENABLE_CLEANUP`.
 
-- Cada documento tiene un `expires_at`.
-- Un scheduler en background ejecuta limpieza periódica cada minuto.
-- Cuando un documento expira, se eliminan:
-  - el PDF original,
-  - y el JSON procesado asociado (incluyendo sus embeddings).
+- Con `ENABLE_CLEANUP=true`:
+  - Cada documento tiene un `expires_at`.
+  - Un scheduler en background ejecuta limpieza periódica cada minuto.
+  - También se ejecuta una limpieza preventiva al recibir cada subida.
+  - Cuando un documento expira, se eliminan el PDF original, el JSON procesado asociado (incluyendo sus embeddings) y los vectores correspondientes en Qdrant.
+- Con `ENABLE_CLEANUP=false` (valor por defecto):
+  - El scheduler no se arranca.
+  - No se ejecuta limpieza preventiva en el upload.
+  - Los documentos y sus vectores se conservan indefinidamente.
 
-Este comportamiento está orientado a una demo temporal y reduce la retención innecesaria de archivos. `SESSION_TTL_MINUTES` está fijado a `1` minuto de forma intencional durante el desarrollo, para poder probar rápido el ciclo completo de expiración y limpieza; se ajustará a un valor de producción más adelante.
+Este flag permite alternar entre dos casos de uso distintos: una demo temporal orientada a subidas anónimas con retención limitada (`ENABLE_CLEANUP=true`), o una base de conocimiento persistente pensada para un chatbot que responde preguntas sobre un perfil o portafolio concreto (`ENABLE_CLEANUP=false`).
 
 ## Seguridad implementada
 
@@ -206,6 +219,16 @@ Los embeddings se generan localmente con [FastEmbed](https://github.com/qdrant/f
 - `embed_texts()` genera embeddings para una lista de chunks manteniendo el orden y alineación con el índice original.
 - `embed_query()` está preparado para la fase de retrieval, generando el embedding de una consulta de usuario.
 
+## Vectorstore (Qdrant)
+
+Los chunks con embedding se indexan en Qdrant para permitir retrieval semántico:
+
+- Colección configurable vía `QDRANT_COLLECTION`, con distancia coseno.
+- Cada punto guarda como payload el texto del chunk y sus metadatos (`document_id`, `session_id`, `filename`, `chunk_index`, `length`).
+- El ID de cada punto se calcula de forma determinista con `uuid5` a partir del `chunk_id`, evitando duplicados si se reprocesa el mismo documento.
+- `search()` permite filtrar por `session_id` y/o `document_id` al recuperar los chunks más similares a una query.
+- `delete_document()` elimina todos los puntos asociados a un documento, usado por el borrado automático cuando está activado.
+
 ## Rate limiting
 
 El proyecto usa `slowapi` para limitar peticiones por IP. Si amplías el endpoint de subida o añades nuevos endpoints sensibles, conviene mantener límites explícitos por ruta.
@@ -232,6 +255,8 @@ app/
     service.py
   health/
     router.py
+  vectorstore/
+    qdrant.py
   main.py
 data/
   uploads/
@@ -254,11 +279,10 @@ La API queda expuesta en:
 
 Los siguientes bloques naturales del proyecto son:
 
-1. Indexar los embeddings en una base de datos vectorial (Qdrant).
-2. Crear un endpoint `/query` que realice retrieval semántico filtrando por sesión/documento.
-3. Conectar el retrieval a un modelo generativo (LLM) para producir respuestas con contexto.
-4. Evaluar y, si procede, mejorar aún más el chunking (detección de secciones/headings).
-5. Subir `SESSION_TTL_MINUTES` a un valor de producción antes de cualquier demo o despliegue.
+1. Crear un endpoint `/query` que realice retrieval semántico filtrando por sesión/documento.
+2. Conectar el retrieval a un modelo generativo (LLM) local vía Ollama para producir respuestas con contexto.
+3. Evaluar y, si procede, mejorar aún más el chunking (detección de secciones/headings).
+4. Simplificar el modelo de sesión para el caso de uso de chatbot de portafolio, donde no hay usuarios anónimos subiendo documentos ajenos.
 
 ## Documentación interactiva
 
@@ -267,3 +291,4 @@ Disponible en:
 - [http://127.0.0.1:8001/docs](http://127.0.0.1:8001/docs)
 
 Si el endpoint requiere API key, usa el botón **Authorize** en Swagger UI para introducir `X-API-Key`.
+</content>

@@ -70,9 +70,9 @@ async def save_pdf(file: UploadFile, session_id: str) -> UploadResponse:
     8. Guarda un JSON procesado con metadatos, chunks y embeddings.
     9. Devuelve la respuesta del upload.
     """
-    # Limpieza preventiva: aunque ya exista scheduler, esto añade una capa
-    # extra de seguridad para no dejar basura si algo se quedó pendiente.
-    cleanup_expired_documents()
+    # Limpieza preventiva, solo si está activada en configuración.
+    if settings.enable_cleanup:
+        cleanup_expired_documents()
 
     # Leemos el contenido completo del archivo subido.
     content = await file.read()
